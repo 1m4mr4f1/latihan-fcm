@@ -11,65 +11,62 @@ export async function GET() {
   }
 }
 
-// 1. POST: Manager membuat tugas untuk Staff tertentu
 export async function POST(req: Request) {
   try {
     const { title, managerId, staffId } = await req.json();
-
-    // Simpan ke database
-    await sql`
-      INSERT INTO tasks (title, manager_id, staff_id, status) 
-      VALUES (${title}, ${managerId}, ${staffId}, 'pending')
-    `;
     
-    // CARI TOKEN: Hanya milik Staff yang dituju (staffId)
-    const rows = await sql`SELECT token FROM fcm_tokens WHERE user_id = ${staffId}`;
-    const tokens = rows.map(r => r.token);
+    // Tambahkan status 'pending' secara default agar DB tidak error
+    await sql`INSERT INTO tasks (title, manager_id, staff_id, status) VALUES (${title}, ${managerId}, ${staffId}, 'pending')`;
     
-    // KIRIM NOTIF: Hanya ke perangkat milik Staff tersebut
-    if (tokens.length > 0) {
-      await messagingAdmin.sendEachForMulticast({
-        tokens: tokens,
-        notification: { 
-          title: 'Tugas Baru!', 
-          body: `Manager memberi tugas: ${title}` 
-        }
-      });
+    const tokens = await sql`SELECT token FROM fcm_tokens WHERE user_id = ${staffId}`;
+    const tokenStrings = tokens.map(t => t.token);
+    
+    if (tokenStrings.length > 0) {
+      try {
+        await messagingAdmin.sendEachForMulticast({
+          tokens: tokenStrings,
+          notification: { title: 'Tugas Baru!', body: title }
+        });
+      } catch (fcmErr) {
+        console.error('FCM Error (tapi DB aman):', fcmErr);
+      }
     }
-
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('POST Error:', error);
-    return NextResponse.json({ error: 'Gagal membuat tugas' }, { status: 500 });
+    return NextResponse.json({ error: 'Gagal proses' }, { status: 500 });
   }
 }
 
-// 2. PUT: Staff menyelesaikan tugas -> Lapor ke Manager
 export async function PUT(req: Request) {
   try {
-    const { id, managerId, title } = await req.json();
+    const data = await req.json();
+    const { id, managerId, title } = data;
 
-    // Update status di database
-    await sql`UPDATE tasks SET status = 'done', updated_at = NOW() WHERE id = ${id}`;
-    
-    // CARI TOKEN: Hanya milik Manager yang memberikan tugas (managerId)
-    const rows = await sql`SELECT token FROM fcm_tokens WHERE user_id = ${managerId}`;
-    const tokens = rows.map(r => r.token);
-    
-    // KIRIM NOTIF: Hanya ke perangkat milik Manager
-    if (tokens.length > 0) {
-      await messagingAdmin.sendEachForMulticast({
-        tokens: tokens,
-        notification: { 
-          title: 'Tugas Selesai!', 
-          body: `Staff telah menyelesaikan: ${title}` 
-        }
-      });
+    // VALIDASI KRUSIAL: Jika id atau managerId kosong, HP akan kasih tau lewat log
+    if (!id || !managerId) {
+      console.error('Data PUT tidak lengkap:', data);
+      return NextResponse.json({ error: 'ID atau ManagerID tidak terdeteksi' }, { status: 400 });
     }
 
+    await sql`UPDATE tasks SET status = 'done' WHERE id = ${id}`;
+    
+    const tokens = await sql`SELECT token FROM fcm_tokens WHERE user_id = ${managerId}`;
+    const tokenStrings = tokens.map(t => t.token);
+    
+    if (tokenStrings.length > 0) {
+      try {
+        await messagingAdmin.sendEachForMulticast({
+          tokens: tokenStrings,
+          notification: { title: 'Tugas Selesai!', body: `Staff menyelesaikan: ${title || 'Tugas'}` }
+        });
+      } catch (fcmErr) {
+        console.error('FCM Error (tapi DB update sukses):', fcmErr);
+      }
+    }
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('PUT Error:', error);
-    return NextResponse.json({ error: 'Gagal update tugas' }, { status: 500 });
+    console.error('PUT Error Detail:', error);
+    return NextResponse.json({ error: 'Gagal update' }, { status: 500 });
   }
 }
